@@ -1,0 +1,19 @@
+CREATE STACK:
+  Network:
+  % aws cloudformation create-stack --stack-name NetworkStack --template-body file://network.yml --parameters file://network-parameters.json --region=us-east-1
+  Udagaram:
+  % aws cloudformation create-stack --stack-name UdagramStack --template-body file://udagram.yml --parameters file://udagram-parameters.json --region=us-east-1 --capabilities CAPABILITY_NAMED_IAM
+
+UPDATE STACK:
+ % aws cloudformation update-stack --stack-name UdagramStack --template-body file://udagram-updated.yml --parameters file://udagram-parameters-updated.json --region=us-east-1 --capabilities CAPABILITY_NAMED_IAM
+
+DELETE STACK:
+ % aws cloudformation delete-stack --stack-name UdagramStack --region=us-east-1
+
+Make scripts executable:
+  % chmod +x create-stack.sh delete-stack.sh update-stack.sh
+
+Execute the scripts with the appropriate arguments:
+  ./create-stack.sh my-stack-name my-template.yaml my-params.json
+  ./delete-stack.sh my-stack-name
+  ./update-stack.sh my-stack-name my-updated-template.yaml my-updated-params.json

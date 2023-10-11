@@ -1,0 +1,245 @@
+Description: >
+    Mohamed Elbeltagy / SaaS Ops Engineer in ArcherIRM
+    This template deploys a Load balancer, EC2 instances via AutoScaling,
+    2 of them in a private subnet of each AZ, with appropriate security groups.
+    To create a Stack avoiding InsufficientCapabilitiesException, use the AWS CLI as shown below.
+    $ aws cloudformation create-stack --stack-name UdagramStack \
+    --template-body file://UdagramStack.yml \
+    --parameters file://UdagramStack-parameters.json --capabilities CAPABILITY_IAM
+
+
+Parameters:
+
+    EnvironmentName:
+        Description: An environment name that will be prefixed to resource Name  
+        Type: String  
+
+    InstanceType:
+      Description: The instance type to use for the EC2 instance
+      Type: String
+    
+    BastionInstanceType:
+      Description: The instance type to use for the EC2 instance
+      Type: String
+    
+    AmazonImage:
+      Description: The image type to use for the EC2 instance
+      Type: String
+
+    KeyName:
+      Description: Name of an existing EC2 key pair for SSH access to the EC2 instance.
+      Type: AWS::EC2::KeyPair::KeyName
+    
+
+Resources:
+  LBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to our load balancer
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress: []
+      Tags:
+        - Key: Name 
+          Value: !Sub ${EnvironmentName} LBSecgroup
+
+  WebServerSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to our host and SSH from local host only
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        SourceSecurityGroupId: 
+          Ref: LBSecGroup
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0  # Removed the previous rule which were allowing all inbound traffic on port 80.
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name 
+          Value: !Sub ${EnvironmentName} WebServerSecgroup
+
+  ProfileWithRolesForWebApp:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Roles:
+        - WebAppS3ReadOnlyEC2
+  
+  
+  BastionServerSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to our host and SSH from local host only
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name 
+          Value: !Sub ${EnvironmentName} BastionServerSecgroup
+
+  BastionLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${EnvironmentName}-Bastion-LaunchTemplate
+      LaunchTemplateData: 
+        ImageId: !Ref AmazonImage
+        KeyName: !Ref KeyName
+        IamInstanceProfile: 
+          Name: !Ref ProfileWithRolesForWebApp
+        SecurityGroupIds:
+          - Ref: BastionServerSecGroup
+        InstanceType: !Ref BastionInstanceType
+        BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: 10
+
+
+  BastionAppGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue:
+          !Sub "${EnvironmentName}-PUB-NETS"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BastionLaunchTemplate
+        Version: !GetAtt [BastionLaunchTemplate, LatestVersionNumber]
+      MinSize: '2'
+      MaxSize: '2'
+    DependsOn: BastionLaunchTemplate
+
+
+
+
+
+  WebAppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${EnvironmentName}-WebApp-LaunchTemplate
+      LaunchTemplateData: 
+        UserData: 
+          Fn::Base64: |
+            #!/bin/bash
+            apt-get update -y
+            sudo apt-get install nginx -y
+            service nginx start
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            sudo apt install unzip
+            unzip awscliv2.zip
+            sudo ./aws/install
+            cd /var/www/html
+            sudo aws s3 cp s3://cloudformationwebapp/ . --recursive --region us-east-1
+        ImageId: !Ref AmazonImage
+        KeyName: !Ref KeyName
+        IamInstanceProfile: 
+          Name: !Ref ProfileWithRolesForWebApp
+        SecurityGroupIds:
+          - Ref: WebServerSecGroup
+        InstanceType: !Ref InstanceType
+        BlockDeviceMappings:
+          - DeviceName: "/dev/sdk"
+            Ebs: 
+              VolumeSize: 10
+
+
+
+  WebAppGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue:
+          !Sub "${EnvironmentName}-PRIV-NETS"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebAppLaunchTemplate
+        Version: !GetAtt [WebAppLaunchTemplate, LatestVersionNumber]
+      MinSize: '2' 
+      MaxSize: '2'
+      TargetGroupARNs:
+      - Ref: WebAppTargetGroup
+    DependsOn: WebAppLaunchTemplate
+
+
+  WebAppLB:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Subnets:
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
+      SecurityGroups:
+      - Ref: LBSecGroup
+
+  Listener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions: #required
+      - Type: forward
+        TargetGroupArn:
+          Ref: WebAppTargetGroup
+      LoadBalancerArn: #required
+        Ref: WebAppLB
+      Port: '80' #required
+      Protocol: HTTP #required
+
+  ALBListenerRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      Actions: #required
+      - Type: forward
+        TargetGroupArn: !Ref 'WebAppTargetGroup'
+      Conditions: #required
+      - Field: path-pattern
+        Values: [/index.html]
+      ListenerArn: !Ref 'Listener' #required
+      Priority: 1 #required
+
+  WebAppTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${EnvironmentName}-VPCID"
+
+Outputs:
+  LoadBalancerDNSName:
+    Description: The DNSName of the backup load balancer
+    Value: !Join [ "//", [ 'http:', !GetAtt WebAppLB.DNSName ]] 
+    Export:
+      Name: !Sub ${EnvironmentName}-LB
